@@ -14,8 +14,9 @@
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
 
+#include "Astar_searcher.h"
+#include "JPS_searcher.h"
 #include "backward.hpp"
-#include "graph_searcher.h"
 
 using namespace std;
 using namespace Eigen;
@@ -37,34 +38,34 @@ int _max_x_id, _max_y_id, _max_z_id;
 
 // ros related
 ros::Subscriber _map_sub, _pts_sub;
-ros::Publisher _grid_path_vis_pub, _debug_nodes_vis_pub, _closed_nodes_vis_pub,
-    _open_nodes_vis_pub, _close_nodes_sequence_vis_pub, _grid_map_vis_pub;
+ros::Publisher _grid_path_vis_pub, _visited_nodes_vis_pub, _grid_map_vis_pub;
 
-gridPathFinder *_path_finder = new gridPathFinder();
+AstarPathFinder *_astar_path_finder = new AstarPathFinder();
+JPSPathFinder *_jps_path_finder = new JPSPathFinder();
 
 void rcvWaypointsCallback(const nav_msgs::Path &wp);
 void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 &pointcloud_map);
 
-void visDebugNodes(vector<Vector3d> nodes);
 void visGridPath(vector<Vector3d> nodes, bool is_use_jps);
-void visCloseNode(vector<Vector3d> nodes);
-void visOpenNode(vector<Vector3d> nodes);
-void visCloseNodeSequence(vector<Vector3d> nodes);
+void visVisitedNode(vector<Vector3d> nodes);
 void pathFinding(const Vector3d start_pt, const Vector3d target_pt);
 
 void rcvWaypointsCallback(const nav_msgs::Path &wp) {
   if (wp.poses[0].pose.position.z < 0.0 || _has_map == false)
     return;
 
+  // set the traget with Click in RVIZ
   Vector3d target_pt;
   target_pt << wp.poses[0].pose.position.x, wp.poses[0].pose.position.y,
       wp.poses[0].pose.position.z;
 
-  ROS_INFO("[jps_node] receive the way-points");
+  // Read into parameters
+  ROS_INFO("[node] receive the planning target");
   pathFinding(_start_pt, target_pt);
 }
 
 void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 &pointcloud_map) {
+  // store the obstacle information
   if (_has_map)
     return;
 
@@ -77,29 +78,21 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 &pointcloud_map) {
   if ((int)cloud.points.size() == 0)
     return;
 
-  pcl::PointXYZ pt, pt_inf;
-  int inf_step = round(_cloud_margin * _inv_resolution);
-  int inf_step_z = max(1, inf_step / 2);
+  pcl::PointXYZ pt;
   for (int idx = 0; idx < (int)cloud.points.size(); idx++) {
     pt = cloud.points[idx];
-    for (int x = -inf_step; x <= inf_step; x++) {
-      for (int y = -inf_step; y <= inf_step; y++) {
-        for (int z = -inf_step_z; z <= inf_step_z; z++) {
-          double inf_x = pt.x + x * _resolution;
-          double inf_y = pt.y + y * _resolution;
-          double inf_z = pt.z + z * _resolution;
-          _path_finder->setObs(inf_x, inf_y, inf_z);
 
-          Vector3d cor_inf =
-              _path_finder->coordRounding(Vector3d(inf_x, inf_y, inf_z));
+    // set obstalces into grid map for path planning
+    _astar_path_finder->setObs(pt.x, pt.y, pt.z);
+    _jps_path_finder->setObs(pt.x, pt.y, pt.z);
 
-          pt_inf.x = cor_inf(0);
-          pt_inf.y = cor_inf(1);
-          pt_inf.z = cor_inf(2);
-          cloud_vis.points.push_back(pt_inf);
-        }
-      }
-    }
+    // for visualize only
+    Vector3d cor_round =
+        _astar_path_finder->coordRounding(Vector3d(pt.x, pt.y, pt.z));
+    pt.x = cor_round(0);
+    pt.y = cor_round(1);
+    pt.z = cor_round(2);
+    cloud_vis.points.push_back(pt);
   }
 
   cloud_vis.width = cloud_vis.points.size();
@@ -115,18 +108,41 @@ void rcvPointCloudCallBack(const sensor_msgs::PointCloud2 &pointcloud_map) {
 }
 
 void pathFinding(const Vector3d start_pt, const Vector3d target_pt) {
-  _path_finder->graphSearch(start_pt, target_pt, true);
-  auto grid_path = _path_finder->getPath();
-  visGridPath(grid_path, true);
-  visDebugNodes(_path_finder->debugNodes);
-  _path_finder->resetUsedGrids();
+  // Call A* to search for a path
+  _astar_path_finder->AstarGraphSearch(start_pt, target_pt);
 
-  _path_finder->graphSearch(start_pt, target_pt, false);
-  grid_path = _path_finder->getPath();
+  // Retrieve the path
+  auto grid_path = _astar_path_finder->getPath();
+  auto visited_nodes = _astar_path_finder->getVisitedNodes();
+
+  // Visualize the result
   visGridPath(grid_path, false);
-  auto close_nodes = _path_finder->getCloseNodes();
-  visCloseNode(close_nodes);
-  _path_finder->resetUsedGrids();
+  visVisitedNode(visited_nodes);
+
+  // Reset map for next call
+  _astar_path_finder->resetUsedGrids();
+
+  //_use_jps = 0 -> Do not use JPS
+  //_use_jps = 1 -> Use JPS
+  // you just need to change the #define value of _use_jps
+#define _use_jps 0
+#if _use_jps
+  {
+    // Call JPS to search for a path
+    _jps_path_finder->JPSGraphSearch(start_pt, target_pt);
+
+    // Retrieve the path
+    auto grid_path = _jps_path_finder->getPath();
+    auto visited_nodes = _jps_path_finder->getVisitedNodes();
+
+    // Visualize the result
+    visGridPath(grid_path, _use_jps);
+    visVisitedNode(visited_nodes);
+
+    // Reset map for next call
+    _jps_path_finder->resetUsedGrids();
+  }
+#endif
 }
 
 int main(int argc, char **argv) {
@@ -139,14 +155,8 @@ int main(int argc, char **argv) {
   _grid_map_vis_pub = nh.advertise<sensor_msgs::PointCloud2>("grid_map_vis", 1);
   _grid_path_vis_pub =
       nh.advertise<visualization_msgs::Marker>("grid_path_vis", 1);
-  _debug_nodes_vis_pub =
-      nh.advertise<visualization_msgs::Marker>("debug_nodes_vis", 1);
-  _closed_nodes_vis_pub =
-      nh.advertise<visualization_msgs::Marker>("closed_nodes_vis", 1);
-  _open_nodes_vis_pub =
-      nh.advertise<visualization_msgs::Marker>("open_nodes_vis", 1);
-  _close_nodes_sequence_vis_pub =
-      nh.advertise<visualization_msgs::Marker>("close_nodes_sequence_vis", 10);
+  _visited_nodes_vis_pub =
+      nh.advertise<visualization_msgs::Marker>("visited_nodes_vis", 1);
 
   nh.param("map/cloud_margin", _cloud_margin, 0.0);
   nh.param("map/resolution", _resolution, 0.2);
@@ -168,9 +178,13 @@ int main(int argc, char **argv) {
   _max_y_id = (int)(_y_size * _inv_resolution);
   _max_z_id = (int)(_z_size * _inv_resolution);
 
-  _path_finder = new gridPathFinder();
-  _path_finder->initGridMap(_resolution, _map_lower, _map_upper, _max_x_id,
-                            _max_y_id, _max_z_id);
+  _astar_path_finder = new AstarPathFinder();
+  _astar_path_finder->initGridMap(_resolution, _map_lower, _map_upper,
+                                  _max_x_id, _max_y_id, _max_z_id);
+
+  _jps_path_finder = new JPSPathFinder();
+  _jps_path_finder->initGridMap(_resolution, _map_lower, _map_upper, _max_x_id,
+                                _max_y_id, _max_z_id);
 
   ros::Rate rate(100);
   bool status = ros::ok();
@@ -180,46 +194,9 @@ int main(int argc, char **argv) {
     rate.sleep();
   }
 
-  delete _path_finder;
+  delete _astar_path_finder;
+  delete _jps_path_finder;
   return 0;
-}
-
-void visDebugNodes(vector<Vector3d> nodes) {
-  visualization_msgs::Marker node_vis;
-  node_vis.header.frame_id = "world";
-  node_vis.header.stamp = ros::Time::now();
-
-  node_vis.ns = "demo_node/debug_info";
-
-  node_vis.type = visualization_msgs::Marker::CUBE_LIST;
-  node_vis.action = visualization_msgs::Marker::ADD;
-  node_vis.id = 0;
-
-  node_vis.pose.orientation.x = 0.0;
-  node_vis.pose.orientation.y = 0.0;
-  node_vis.pose.orientation.z = 0.0;
-  node_vis.pose.orientation.w = 1.0;
-
-  node_vis.color.a = 0.5;
-  node_vis.color.r = 0.0;
-  node_vis.color.g = 0.0;
-  node_vis.color.b = 0.0;
-
-  node_vis.scale.x = _resolution;
-  node_vis.scale.y = _resolution;
-  node_vis.scale.z = _resolution;
-
-  geometry_msgs::Point pt;
-  for (int i = 0; i < int(nodes.size()); i++) {
-    Vector3d coord = nodes[i];
-    pt.x = coord(0);
-    pt.y = coord(1);
-    pt.z = coord(2);
-
-    node_vis.points.push_back(pt);
-  }
-
-  _debug_nodes_vis_pub.publish(node_vis);
 }
 
 void visGridPath(vector<Vector3d> nodes, bool is_use_jps) {
@@ -270,11 +247,11 @@ void visGridPath(vector<Vector3d> nodes, bool is_use_jps) {
   _grid_path_vis_pub.publish(node_vis);
 }
 
-void visCloseNode(vector<Vector3d> nodes) {
+void visVisitedNode(vector<Vector3d> nodes) {
   visualization_msgs::Marker node_vis;
   node_vis.header.frame_id = "world";
   node_vis.header.stamp = ros::Time::now();
-  node_vis.ns = "demo_node/closed_nodes";
+  node_vis.ns = "demo_node/expanded_nodes";
   node_vis.type = visualization_msgs::Marker::CUBE_LIST;
   node_vis.action = visualization_msgs::Marker::ADD;
   node_vis.id = 0;
@@ -302,75 +279,5 @@ void visCloseNode(vector<Vector3d> nodes) {
     node_vis.points.push_back(pt);
   }
 
-  _closed_nodes_vis_pub.publish(node_vis);
-}
-
-void visOpenNode(vector<Vector3d> nodes) {
-  visualization_msgs::Marker node_vis;
-  node_vis.header.frame_id = "world";
-  node_vis.header.stamp = ros::Time::now();
-  node_vis.ns = "demo_node/visited_nodes";
-  node_vis.type = visualization_msgs::Marker::CUBE_LIST;
-  node_vis.action = visualization_msgs::Marker::ADD;
-  node_vis.id = 0;
-
-  node_vis.pose.orientation.x = 0.0;
-  node_vis.pose.orientation.y = 0.0;
-  node_vis.pose.orientation.z = 0.0;
-  node_vis.pose.orientation.w = 1.0;
-  node_vis.color.a = 0.3;
-  node_vis.color.r = 0.0;
-  node_vis.color.g = 1.0;
-  node_vis.color.b = 0.0;
-
-  node_vis.scale.x = _resolution;
-  node_vis.scale.y = _resolution;
-  node_vis.scale.z = _resolution;
-
-  geometry_msgs::Point pt;
-  for (int i = 0; i < int(nodes.size()); i++) {
-    Vector3d coord = nodes[i];
-    pt.x = coord(0);
-    pt.y = coord(1);
-    pt.z = coord(2);
-
-    node_vis.points.push_back(pt);
-  }
-
-  _open_nodes_vis_pub.publish(node_vis);
-}
-
-void visCloseNodeSequence(vector<Vector3d> nodes) {
-  visualization_msgs::Marker node_vis;
-  node_vis.header.frame_id = "world";
-  node_vis.header.stamp = ros::Time::now();
-  node_vis.ns = "demo_node/animation_of_close_nodes";
-  node_vis.type = visualization_msgs::Marker::CUBE_LIST;
-  node_vis.action = visualization_msgs::Marker::ADD;
-  node_vis.id = 0;
-
-  node_vis.pose.orientation.x = 0.0;
-  node_vis.pose.orientation.y = 0.0;
-  node_vis.pose.orientation.z = 0.0;
-  node_vis.pose.orientation.w = 1.0;
-  node_vis.color.a = 1.0;
-  node_vis.color.r = 0.0;
-  node_vis.color.g = 0.0;
-  node_vis.color.b = 0.0;
-
-  node_vis.scale.x = _resolution;
-  node_vis.scale.y = _resolution;
-  node_vis.scale.z = _resolution;
-
-  geometry_msgs::Point pt;
-  for (int i = 0; i < int(nodes.size()); i++) {
-    usleep(50000);
-    Vector3d coord = nodes[i];
-    pt.x = coord(0);
-    pt.y = coord(1);
-    pt.z = coord(2);
-
-    node_vis.points.push_back(pt);
-    _close_nodes_sequence_vis_pub.publish(node_vis);
-  }
+  _visited_nodes_vis_pub.publish(node_vis);
 }
