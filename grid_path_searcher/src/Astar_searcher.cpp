@@ -146,17 +146,13 @@ double AstarPathFinder::getHeu(GridNodePtr node1, GridNodePtr node2) {
   /*
   choose possible heuristic function you want
   Manhattan, Euclidean, Diagonal, or 0 (Dijkstra)
-  Remember tie_breaker learned in lecture, add it here ?
-  *
-  *
-  *
-  STEP 1: finish the AstarPathFinder::getHeu , which is the heuristic function
-  please write your code below
-  *
-  *
   */
+  // First use Eulidean
+  double diff_x = node1->coord[0] - node2->coord[0];
+  double diff_y = node1->coord[1] - node2->coord[1];
+  double diff_z = node1->coord[2] - node2->coord[2];
 
-  return 0;
+  return sqrt(pow(diff_x, 2) + pow(diff_y, 2) + pow(diff_z, 2));
 }
 
 void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
@@ -259,7 +255,8 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
         */
         continue;
       } else if (0) { // this node is in open set and need to judge if it needs
-                      // to update, the "0" should be deleted when you are coding
+                      // to update, the "0" should be deleted when you are
+                      // coding
         /*
         *
         *
